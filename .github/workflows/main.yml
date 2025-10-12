@@ -6,7 +6,7 @@ on:
 jobs:
   apply-patch:
     name: Apply SUSFS Patch
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout kernel source
