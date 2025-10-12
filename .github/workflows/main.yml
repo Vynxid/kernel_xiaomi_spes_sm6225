@@ -1,53 +1,42 @@
-name: Apply SUSFS v1.5.8 (KernelSU Next v1.0.8)
+name: Add SUSFS to Kernel (Simple Copy Mode)
 
 on:
   workflow_dispatch:
 
 jobs:
-  apply-patch:
-    name: Apply SUSFS Patch
-    runs-on: ubuntu-latest
+  add-susfs:
+    runs-on: ubuntu-22.04
 
     steps:
-    - name: Checkout kernel source
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Set up environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y git patch curl
+      - name: Clone SUSFS source (ASUS SDM660)
+        run: |
+          echo "🧩 Cloning SUSFS source..."
+          git clone https://github.com/rsuplaygrnd/android_kernel_asus_sdm660 susfs-src --depth=1
 
-    - name: Apply SUSFS v1.5.8 Patch
-      run: |
-        echo "🧩 Applying SUSFS v1.5.8 (KernelSU Next v1.0.8)..."
+      - name: Copy SUSFS files into your kernel tree
+        run: |
+          echo "📦 Copying SUSFS core files..."
+          cp -r susfs-src/fs/susfs* fs/ || true
+          cp -r susfs-src/include/linux/susfs* include/linux/ || true
 
-        # Nama patch file
-        PATCH_FILE="50_add_susfs_in_kernel-4.19.patch"
+          echo "🧱 Updating fs/Makefile..."
+          echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
 
-        # Jika patch sudah ada di repo (misalnya kamu upload ke root repo)
-        if [ -f "$PATCH_FILE" ]; then
-          echo "📦 Found patch file in repo: $PATCH_FILE"
-        else
-          # Kalau patch disimpan di repo lain, ubah URL berikut ke link raw file patch kamu
-          curl -L -o $PATCH_FILE https://raw.githubusercontent.com/<username>/<repo>/main/$PATCH_FILE
-        fi
+      - name: Commit and push changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-        # Terapkan patch
-        echo "⚙️ Applying..."
-        git apply --ignore-space-change --ignore-whitespace $PATCH_FILE || {
-          echo "⚠️ git apply failed, trying patch -p1"
-          patch -p1 < $PATCH_FILE
-        }
+          git checkout -b susfs-added
+          git add fs/susfs* include/linux/susfs* fs/Makefile
+          git commit -m "Add SUSFS (copied from ASUS SDM660)"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" susfs-added
 
-        echo "✅ SUSFS patch applied successfully."
-
-    - name: Commit patched source
-      run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-        git add .
-        git commit -m "Applied SUSFS v1.5.8 (KernelSU Next v1.0.8)" || echo "No changes to commit"
-        git push origin HEAD
+          echo "✅ SUSFS files successfully added to branch 'susfs-added'"
