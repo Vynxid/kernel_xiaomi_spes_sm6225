@@ -1,42 +1,333 @@
-name: Add SUSFS to Kernel (Simple Copy Mode)
+name: Add SUSFS to Kernel (Flexible Mode)
 
 on:
   workflow_dispatch:
+    inputs:
+      patch_method:
+        description: 'Patch method'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - git-apply
+          - patch-command
+          - manual-copy
 
 jobs:
   add-susfs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout kernel source
+      - name: Checkout your kernel source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Clone SUSFS source (ASUS SDM660)
+      - name: Setup environment
         run: |
-          echo "🧩 Cloning SUSFS source..."
-          git clone https://github.com/rsuplaygrnd/android_kernel_asus_sdm660 susfs-src --depth=1
+          echo "🔧 Setting up environment..."
+          sudo apt-get update
+          sudo apt-get install -y patch git wget curl
 
-      - name: Copy SUSFS files into your kernel tree
+      - name: Clone SUSFS source
         run: |
-          echo "📦 Copying SUSFS core files..."
-          cp -r susfs-src/fs/susfs* fs/ || true
-          cp -r susfs-src/include/linux/susfs* include/linux/ || true
+          echo "📥 Cloning SUSFS source repository..."
+          git clone https://github.com/rsuplaygrnd/android_kernel_asus_sdm660 susfs-repo --depth=1
+          cd susfs-repo
+          git checkout fbd1ce64e7375a70c06f41584f9e783af763ea0e || echo "Using latest commit"
+          cd ..
 
-          echo "🧱 Updating fs/Makefile..."
-          echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+      - name: Download patch file
+        run: |
+          echo "📥 Downloading patch file..."
+          wget https://github.com/rsuplaygrnd/android_kernel_asus_sdm660/commit/fbd1ce64e7375a70c06f41584f9e783af763ea0e.patch -O susfs.patch
+          echo "📄 Patch file size: $(wc -c < susfs.patch) bytes"
 
-      - name: Commit and push changes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Try automatic patching
+        id: auto_patch
+        if: inputs.patch_method == 'auto' || inputs.patch_method == 'git-apply'
+        continue-on-error: true
+        run: |
+          echo "🔧 Attempting git apply..."
+          if git apply --check susfs.patch 2>&1; then
+            git apply susfs.patch
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✅ Git apply successful"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "⚠️ Git apply failed, will try alternative methods"
+          fi
+
+      - name: Try patch command
+        id: patch_cmd
+        if: (inputs.patch_method == 'auto' && steps.auto_patch.outputs.status != 'success') || inputs.patch_method == 'patch-command'
+        continue-on-error: true
+        run: |
+          echo "🔧 Attempting patch command..."
+          if patch -p1 --dry-run < susfs.patch 2>&1; then
+            patch -p1 < susfs.patch
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✅ Patch command successful"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "⚠️ Patch command failed, will try manual copy"
+          fi
+
+      - name: Manual file copy (fallback)
+        if: |
+          inputs.patch_method == 'manual-copy' || 
+          (steps.auto_patch.outputs.status != 'success' && steps.patch_cmd.outputs.status != 'success')
+        run: |
+          echo "📦 Using manual copy method..."
+          
+          # Extract files from source repo
+          if [ -f "susfs-repo/fs/susfs.c" ]; then
+            echo "✓ Copying fs/susfs.c"
+            cp susfs-repo/fs/susfs.c fs/
+          else
+            echo "⚠️ susfs.c not found in source"
+          fi
+          
+          if [ -f "susfs-repo/include/linux/susfs.h" ]; then
+            echo "✓ Copying include/linux/susfs.h"
+            mkdir -p include/linux
+            cp susfs-repo/include/linux/susfs.h include/linux/
+          else
+            echo "⚠️ susfs.h not found in source"
+          fi
+
+      - name: Update Makefile and Kconfig
+        run: |
+          echo "📝 Updating fs/Makefile..."
+          
+          # Check if SUSFS already in Makefile
+          if ! grep -q "susfs" fs/Makefile; then
+            echo "" >> fs/Makefile
+            echo "# SUSFS support" >> fs/Makefile
+            echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+            echo "✅ Makefile updated"
+          else
+            echo "ℹ️ SUSFS already in Makefile"
+          fi
+          
+          echo "📝 Checking fs/Kconfig..."
+          if [ -f "fs/Kconfig" ]; then
+            if ! grep -q "KSU_SUSFS" fs/Kconfig; then
+              # Add SUSFS config option
+              cat >> fs/Kconfig << 'EOF'
+
+config KSU_SUSFS
+	bool "KernelSU SUSFS support"
+	depends on KSU
+	default y
+	help
+	  Enable SUSFS (KernelSU File System) support.
+	  This provides additional security features for KernelSU.
+EOF
+              echo "✅ Kconfig updated"
+            else
+              echo "ℹ️ KSU_SUSFS already in Kconfig"
+            fi
+          else
+            echo "⚠️ fs/Kconfig not found, skipping"
+          fi
+
+      - name: Verify SUSFS files
+        id: verify
+        run: |
+          echo "🔍 Verifying SUSFS installation..."
+          
+          ALL_OK=true
+          
+          if [ -f "fs/susfs.c" ]; then
+            echo "✅ fs/susfs.c exists ($(wc -l < fs/susfs.c) lines)"
+          else
+            echo "❌ fs/susfs.c missing"
+            ALL_OK=false
+          fi
+          
+          if [ -f "include/linux/susfs.h" ]; then
+            echo "✅ include/linux/susfs.h exists ($(wc -l < include/linux/susfs.h) lines)"
+          else
+            echo "❌ include/linux/susfs.h missing"
+            ALL_OK=false
+          fi
+          
+          if grep -q "susfs" fs/Makefile; then
+            echo "✅ fs/Makefile updated"
+          else
+            echo "❌ fs/Makefile not updated"
+            ALL_OK=false
+          fi
+          
+          if [ "$ALL_OK" = false ]; then
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✅ All SUSFS files verified successfully!"
+          fi
+
+      - name: Generate patch report
+        if: always()
+        run: |
+          echo "📊 Generating patch report..."
+          
+          cat > SUSFS_PATCH_REPORT.md << 'EOF'
+          # SUSFS Patch Report
+          
+          ## Applied Changes
+          
+          ### New Files
+          EOF
+          
+          if [ -f "fs/susfs.c" ]; then
+            echo "- ✅ \`fs/susfs.c\` ($(wc -l < fs/susfs.c) lines)" >> SUSFS_PATCH_REPORT.md
+          fi
+          
+          if [ -f "include/linux/susfs.h" ]; then
+            echo "- ✅ \`include/linux/susfs.h\` ($(wc -l < include/linux/susfs.h) lines)" >> SUSFS_PATCH_REPORT.md
+          fi
+          
+          cat >> SUSFS_PATCH_REPORT.md << 'EOF'
+          
+          ### Modified Files
+          EOF
+          
+          if grep -q "susfs" fs/Makefile; then
+            echo "- ✅ \`fs/Makefile\` - Added SUSFS object" >> SUSFS_PATCH_REPORT.md
+          fi
+          
+          if [ -f "fs/Kconfig" ] && grep -q "KSU_SUSFS" fs/Kconfig; then
+            echo "- ✅ \`fs/Kconfig\` - Added KSU_SUSFS config" >> SUSFS_PATCH_REPORT.md
+          fi
+          
+          cat >> SUSFS_PATCH_REPORT.md << 'EOF'
+          
+          ## How to Enable
+          
+          Add to your defconfig:
+          ```
+          CONFIG_KSU_SUSFS=y
+          ```
+          
+          ## Source
+          - Original commit: https://github.com/rsuplaygrnd/android_kernel_asus_sdm660/commit/fbd1ce64e7375a70c06f41584f9e783af763ea0e
+          EOF
+          
+          cat SUSFS_PATCH_REPORT.md
+
+      - name: Show git changes
+        run: |
+          echo "📋 Git status:"
+          git status
+          
+          echo ""
+          echo "📊 Changed files:"
+          git diff --stat
+          
+          echo ""
+          echo "📝 Detailed changes:"
+          git diff --name-only
+
+      - name: Commit changes
+        if: steps.verify.outputs.status == 'success'
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          git checkout -b susfs-added
-          git add fs/susfs* include/linux/susfs* fs/Makefile
-          git commit -m "Add SUSFS (copied from ASUS SDM660)"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" susfs-added
+          git checkout -b susfs-integrated
+          git add fs/susfs.c include/linux/susfs.h fs/Makefile fs/Kconfig SUSFS_PATCH_REPORT.md 2>/dev/null || true
+          
+          git commit -m "kernel: Add SUSFS (KernelSU File System) support
 
-          echo "✅ SUSFS files successfully added to branch 'susfs-added'"
+This commit integrates SUSFS from the ASUS SDM660 kernel.
+
+Changes:
+- Add fs/susfs.c: Core SUSFS implementation
+- Add include/linux/susfs.h: SUSFS header definitions
+- Update fs/Makefile: Add SUSFS object compilation
+- Update fs/Kconfig: Add KSU_SUSFS configuration option
+
+To enable SUSFS, add to your defconfig:
+CONFIG_KSU_SUSFS=y
+
+Source: https://github.com/rsuplaygrnd/android_kernel_asus_sdm660/commit/fbd1ce64e7375a70c06f41584f9e783af763ea0e
+
+Signed-off-by: github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+
+      - name: Push changes
+        if: steps.verify.outputs.status == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🚀 Pushing to remote..."
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" susfs-integrated --force
+          
+          echo "✅ Successfully pushed to branch 'susfs-integrated'"
+          echo "🔗 View changes: https://github.com/${{ github.repository }}/tree/susfs-integrated"
+
+      - name: Create Pull Request
+        if: steps.verify.outputs.status == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "kernel: Add SUSFS support" \
+            --body "$(cat SUSFS_PATCH_REPORT.md)
+          
+          ---
+          
+          ## Testing
+          
+          To test this change:
+          1. Merge this PR
+          2. Add \`CONFIG_KSU_SUSFS=y\` to your defconfig
+          3. Build the kernel
+          4. Test with KernelSU
+          
+          ## References
+          - Source: https://github.com/rsuplaygrnd/android_kernel_asus_sdm660/commit/fbd1ce64e7375a70c06f41584f9e783af763ea0e
+          - Target kernel: https://github.com/${{ github.repository }}" \
+            --base main \
+            --head susfs-integrated 2>&1 || echo "ℹ️ PR may already exist or base branch different"
+
+      - name: Upload patch artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: susfs-patch-files
+          path: |
+            susfs.patch
+            SUSFS_PATCH_REPORT.md
+            fs/susfs.c
+            include/linux/susfs.h
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## 📊 SUSFS Integration Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.verify.outputs.status }}" = "success" ]; then
+            echo "✅ **Status:** Successfully integrated SUSFS" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Files Added" >> $GITHUB_STEP_SUMMARY
+            echo "- \`fs/susfs.c\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`include/linux/susfs.h\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Files Modified" >> $GITHUB_STEP_SUMMARY
+            echo "- \`fs/Makefile\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`fs/Kconfig\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+            echo "1. Review and merge the PR" >> $GITHUB_STEP_SUMMARY
+            echo "2. Add \`CONFIG_KSU_SUSFS=y\` to your defconfig" >> $GITHUB_STEP_SUMMARY
+            echo "3. Build and test the kernel" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Status:** SUSFS integration failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please check the logs above for details." >> $GITHUB_STEP_SUMMARY
+          fi
