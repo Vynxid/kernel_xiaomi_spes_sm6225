@@ -116,15 +116,6 @@ jobs:
             if ! grep -q "KSU_SUSFS" fs/Kconfig; then
               # Add SUSFS config option
               cat >> fs/Kconfig << 'EOF'
-
-config KSU_SUSFS
-	bool "KernelSU SUSFS support"
-	depends on KSU
-	default y
-	help
-	  Enable SUSFS (KernelSU File System) support.
-	  This provides additional security features for KernelSU.
-EOF
               echo "✅ Kconfig updated"
             else
               echo "ℹ️ KSU_SUSFS already in Kconfig"
