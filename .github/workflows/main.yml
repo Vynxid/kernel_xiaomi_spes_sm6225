@@ -1,310 +1,392 @@
-name: Add SUSFS to Kernel (Flexible Mode)
+name: Apply SUSFS Patch to Kernel
 
 on:
   workflow_dispatch:
     inputs:
-      patch_method:
-        description: 'Patch method'
+      kernel_branch:
+        description: 'Kernel branch to patch'
         required: true
-        default: 'auto'
+        default: 'main'
+      susfs_branch:
+        description: 'SUSFS branch to use'
+        required: true
+        default: 'kernel-4.19'
         type: choice
         options:
-          - auto
-          - git-apply
-          - patch-command
-          - manual-copy
+          - kernel-4.19
+          - kernel-5.4
+          - kernel-5.10
+      force_patch:
+        description: 'Force apply patch even with conflicts'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
-  add-susfs:
-    runs-on: ubuntu-22.04
-
+  patch-susfs:
+    runs-on: ubuntu-latest
+    
     steps:
-      - name: Checkout your kernel source
+      - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.kernel_branch }}
           fetch-depth: 0
-
-      - name: Setup environment
+      
+      - name: Setup Build Environment
         run: |
-          echo "🔧 Setting up environment..."
           sudo apt-get update
-          sudo apt-get install -y patch git wget curl
-
-      - name: Clone SUSFS source
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            git \
+            wget \
+            curl
+      
+      - name: Get Kernel Version
+        id: kernel_version
         run: |
-          echo "📥 Cloning SUSFS source repository..."
-          git clone https://github.com/rsuplaygrnd/android_kernel_asus_sdm660 susfs-repo --depth=1
-          cd susfs-repo
-          git checkout fbd1ce64e7375a70c06f41584f9e783af763ea0e || echo "Using latest commit"
-          cd ..
-
-      - name: Download patch file
+          VERSION=$(grep "^VERSION = " Makefile | awk '{print $3}')
+          PATCHLEVEL=$(grep "^PATCHLEVEL = " Makefile | awk '{print $3}')
+          SUBLEVEL=$(grep "^SUBLEVEL = " Makefile | awk '{print $3}')
+          KERNEL_VERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+          echo "version=${KERNEL_VERSION}" >> $GITHUB_OUTPUT
+          echo "Kernel Version: ${KERNEL_VERSION}"
+      
+      - name: Clone SUSFS Repository
         run: |
-          echo "📥 Downloading patch file..."
-          wget https://github.com/rsuplaygrnd/android_kernel_asus_sdm660/commit/fbd1ce64e7375a70c06f41584f9e783af763ea0e.patch -O susfs.patch
-          echo "📄 Patch file size: $(wc -c < susfs.patch) bytes"
-
-      - name: Try automatic patching
-        id: auto_patch
-        if: inputs.patch_method == 'auto' || inputs.patch_method == 'git-apply'
-        continue-on-error: true
+          git clone -b ${{ inputs.susfs_branch }} https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
+          echo "SUSFS cloned successfully"
+      
+      - name: Copy SUSFS Source Files
         run: |
-          echo "🔧 Attempting git apply..."
-          if git apply --check susfs.patch 2>&1; then
-            git apply susfs.patch
-            echo "status=success" >> $GITHUB_OUTPUT
-            echo "✅ Git apply successful"
-          else
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "⚠️ Git apply failed, will try alternative methods"
+          if [ -d "fs/susfs" ]; then
+            echo "⚠️ fs/susfs already exists, backing up..."
+            mv fs/susfs fs/susfs.backup
           fi
-
-      - name: Try patch command
-        id: patch_cmd
-        if: (inputs.patch_method == 'auto' && steps.auto_patch.outputs.status != 'success') || inputs.patch_method == 'patch-command'
-        continue-on-error: true
+          cp -r /tmp/susfs4ksu/fs/susfs fs/
+          echo "✓ SUSFS source copied to fs/susfs/"
+          ls -la fs/susfs/
+      
+      - name: Backup Original Files
         run: |
-          echo "🔧 Attempting patch command..."
-          if patch -p1 --dry-run < susfs.patch 2>&1; then
-            patch -p1 < susfs.patch
-            echo "status=success" >> $GITHUB_OUTPUT
-            echo "✅ Patch command successful"
-          else
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "⚠️ Patch command failed, will try manual copy"
-          fi
-
-      - name: Manual file copy (fallback)
-        if: |
-          inputs.patch_method == 'manual-copy' || 
-          (steps.auto_patch.outputs.status != 'success' && steps.patch_cmd.outputs.status != 'success')
-        run: |
-          echo "📦 Using manual copy method..."
-          
-          # Extract files from source repo
-          if [ -f "susfs-repo/fs/susfs.c" ]; then
-            echo "✓ Copying fs/susfs.c"
-            cp susfs-repo/fs/susfs.c fs/
-          else
-            echo "⚠️ susfs.c not found in source"
-          fi
-          
-          if [ -f "susfs-repo/include/linux/susfs.h" ]; then
-            echo "✓ Copying include/linux/susfs.h"
-            mkdir -p include/linux
-            cp susfs-repo/include/linux/susfs.h include/linux/
-          else
-            echo "⚠️ susfs.h not found in source"
-          fi
-
-      - name: Update Makefile and Kconfig
-        run: |
-          echo "📝 Updating fs/Makefile..."
-          
-          # Check if SUSFS already in Makefile
-          if ! grep -q "susfs" fs/Makefile; then
-            echo "" >> fs/Makefile
-            echo "# SUSFS support" >> fs/Makefile
-            echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
-            echo "✅ Makefile updated"
-          else
-            echo "ℹ️ SUSFS already in Makefile"
-          fi
-          
-          echo "📝 Checking fs/Kconfig..."
-          if [ -f "fs/Kconfig" ]; then
-            if ! grep -q "KSU_SUSFS" fs/Kconfig; then
-              # Add SUSFS config option
-              cat >> fs/Kconfig << 'EOF'
-              echo "✅ Kconfig updated"
-            else
-              echo "ℹ️ KSU_SUSFS already in Kconfig"
+          mkdir -p .backup
+          FILES=(
+            "fs/Kconfig"
+            "fs/Makefile"
+            "fs/open.c"
+            "fs/readdir.c"
+            "fs/stat.c"
+            "fs/exec.c"
+          )
+          for file in "${FILES[@]}"; do
+            if [ -f "$file" ]; then
+              cp "$file" ".backup/$(basename $file)"
+              echo "✓ Backed up: $file"
             fi
+          done
+      
+      - name: Download Patch File
+        run: |
+          PATCH_FILE="50_add_susfs_in_kernel-${{ inputs.susfs_branch }}.patch"
+          PATCH_URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/${{ inputs.susfs_branch }}/kernel_patches/${PATCH_FILE}"
+          
+          wget "$PATCH_URL" -O susfs.patch
+          echo "✓ Patch downloaded: susfs.patch"
+          
+          echo "Patch contents preview:"
+          head -n 50 susfs.patch
+      
+      - name: Test Patch (Dry Run)
+        id: test_patch
+        continue-on-error: true
+        run: |
+          if patch -p1 --dry-run < susfs.patch > patch_dryrun.log 2>&1; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✓ Patch can be applied cleanly!"
+            cat patch_dryrun.log
           else
-            echo "⚠️ fs/Kconfig not found, skipping"
+            echo "status=conflict" >> $GITHUB_OUTPUT
+            echo "⚠️ Patch has conflicts!"
+            cat patch_dryrun.log
           fi
-
-      - name: Verify SUSFS files
+      
+      - name: Apply Patch
+        id: apply_patch
+        continue-on-error: true
+        run: |
+          if [ "${{ steps.test_patch.outputs.status }}" == "success" ]; then
+            echo "Applying patch cleanly..."
+            patch -p1 < susfs.patch
+            echo "result=success" >> $GITHUB_OUTPUT
+            echo "✓ Patch applied successfully!"
+          else
+            echo "Attempting to apply with reject files..."
+            patch -p1 --reject < susfs.patch || true
+            
+            REJECT_FILES=$(find . -name "*.rej" 2>/dev/null || true)
+            if [ -n "$REJECT_FILES" ]; then
+              echo "result=partial" >> $GITHUB_OUTPUT
+              echo "⚠️ Patch applied with conflicts"
+              echo "Reject files:"
+              echo "$REJECT_FILES"
+            else
+              echo "result=success" >> $GITHUB_OUTPUT
+              echo "✓ Patch applied successfully with fuzzy matching"
+            fi
+          fi
+      
+      - name: Analyze Conflicts
+        if: steps.apply_patch.outputs.result == 'partial'
+        run: |
+          echo "## Conflict Analysis" > conflict_report.md
+          echo "" >> conflict_report.md
+          
+          find . -name "*.rej" | while read -r rej_file; do
+            echo "### ${rej_file}" >> conflict_report.md
+            echo '```diff' >> conflict_report.md
+            cat "$rej_file" >> conflict_report.md
+            echo '```' >> conflict_report.md
+            echo "" >> conflict_report.md
+          done
+          
+          cat conflict_report.md
+      
+      - name: Manual Integration Guide
+        if: steps.apply_patch.outputs.result == 'partial'
+        run: |
+          cat > MANUAL_MERGE_GUIDE.md << 'EOF'
+          # SUSFS Manual Merge Guide
+          
+          ## Conflicts Found
+          
+          The patch could not be applied cleanly. Manual intervention required.
+          
+          ## Common Fixes
+          
+          ### fs/Kconfig
+          Add before `endmenu`:
+          ```kconfig
+          source "fs/susfs/Kconfig"
+          ```
+          
+          ### fs/Makefile
+          Add with other obj-y definitions:
+          ```makefile
+          obj-$(CONFIG_KSU_SUSFS) += susfs/
+          ```
+          
+          ### fs/open.c
+          In `do_sys_open()` or `do_filp_open()`, add before `vfs_open()`:
+          ```c
+          #ifdef CONFIG_KSU_SUSFS
+          if (susfs_sus_open(tmp)) {
+              putname(tmp);
+              return -ENOENT;
+          }
+          #endif
+          ```
+          
+          ### fs/stat.c
+          In `vfs_statx()` or `vfs_stat()`:
+          ```c
+          #ifdef CONFIG_KSU_SUSFS
+          if (susfs_sus_stat(pathname))
+              return -ENOENT;
+          #endif
+          ```
+          
+          ### fs/readdir.c
+          In `iterate_dir()`:
+          ```c
+          #ifdef CONFIG_KSU_SUSFS
+          if (susfs_sus_readdir(file))
+              return -ENOENT;
+          #endif
+          ```
+          
+          ## Resolution Steps
+          
+          1. Review `.rej` files for failed hunks
+          2. Manually apply changes to corresponding files
+          3. Delete `.rej` files after resolution
+          4. Run verification checks
+          5. Commit changes
+          EOF
+          
+          cat MANUAL_MERGE_GUIDE.md
+      
+      - name: Verify Integration
         id: verify
         run: |
-          echo "🔍 Verifying SUSFS installation..."
+          echo "## Verification Report" > verification_report.md
+          PASSED=0
+          TOTAL=0
           
-          ALL_OK=true
-          
-          if [ -f "fs/susfs.c" ]; then
-            echo "✅ fs/susfs.c exists ($(wc -l < fs/susfs.c) lines)"
+          # Check 1: SUSFS directory
+          TOTAL=$((TOTAL + 1))
+          if [ -d "fs/susfs" ]; then
+            echo "✓ SUSFS source directory exists" | tee -a verification_report.md
+            PASSED=$((PASSED + 1))
           else
-            echo "❌ fs/susfs.c missing"
-            ALL_OK=false
+            echo "✗ SUSFS source directory missing" | tee -a verification_report.md
           fi
           
-          if [ -f "include/linux/susfs.h" ]; then
-            echo "✅ include/linux/susfs.h exists ($(wc -l < include/linux/susfs.h) lines)"
+          # Check 2: fs/Kconfig
+          TOTAL=$((TOTAL + 1))
+          if grep -q "susfs/Kconfig" fs/Kconfig 2>/dev/null; then
+            echo "✓ SUSFS in fs/Kconfig" | tee -a verification_report.md
+            PASSED=$((PASSED + 1))
           else
-            echo "❌ include/linux/susfs.h missing"
-            ALL_OK=false
+            echo "✗ SUSFS not in fs/Kconfig" | tee -a verification_report.md
           fi
           
-          if grep -q "susfs" fs/Makefile; then
-            echo "✅ fs/Makefile updated"
+          # Check 3: fs/Makefile
+          TOTAL=$((TOTAL + 1))
+          if grep -q "susfs/" fs/Makefile 2>/dev/null; then
+            echo "✓ SUSFS in fs/Makefile" | tee -a verification_report.md
+            PASSED=$((PASSED + 1))
           else
-            echo "❌ fs/Makefile not updated"
-            ALL_OK=false
+            echo "✗ SUSFS not in fs/Makefile" | tee -a verification_report.md
           fi
           
-          if [ "$ALL_OK" = false ]; then
-            echo "status=failed" >> $GITHUB_OUTPUT
-            exit 1
+          # Check 4: fs/open.c hooks
+          TOTAL=$((TOTAL + 1))
+          if grep -q "CONFIG_KSU_SUSFS" fs/open.c 2>/dev/null; then
+            echo "✓ SUSFS hooks in fs/open.c" | tee -a verification_report.md
+            PASSED=$((PASSED + 1))
           else
+            echo "✗ SUSFS hooks not in fs/open.c" | tee -a verification_report.md
+          fi
+          
+          echo "" | tee -a verification_report.md
+          echo "**Result: ${PASSED}/${TOTAL} checks passed**" | tee -a verification_report.md
+          
+          echo "passed=${PASSED}" >> $GITHUB_OUTPUT
+          echo "total=${TOTAL}" >> $GITHUB_OUTPUT
+          
+          if [ $PASSED -eq $TOTAL ]; then
             echo "status=success" >> $GITHUB_OUTPUT
-            echo "✅ All SUSFS files verified successfully!"
+          else
+            echo "status=partial" >> $GITHUB_OUTPUT
           fi
-
-      - name: Generate patch report
-        if: always()
-        run: |
-          echo "📊 Generating patch report..."
-          
-          cat > SUSFS_PATCH_REPORT.md << 'EOF'
-          # SUSFS Patch Report
-          
-          ## Applied Changes
-          
-          ### New Files
-          EOF
-          
-          if [ -f "fs/susfs.c" ]; then
-            echo "- ✅ \`fs/susfs.c\` ($(wc -l < fs/susfs.c) lines)" >> SUSFS_PATCH_REPORT.md
-          fi
-          
-          if [ -f "include/linux/susfs.h" ]; then
-            echo "- ✅ \`include/linux/susfs.h\` ($(wc -l < include/linux/susfs.h) lines)" >> SUSFS_PATCH_REPORT.md
-          fi
-          
-          cat >> SUSFS_PATCH_REPORT.md << 'EOF'
-          
-          ### Modified Files
-          EOF
-          
-          if grep -q "susfs" fs/Makefile; then
-            echo "- ✅ \`fs/Makefile\` - Added SUSFS object" >> SUSFS_PATCH_REPORT.md
-          fi
-          
-          if [ -f "fs/Kconfig" ] && grep -q "KSU_SUSFS" fs/Kconfig; then
-            echo "- ✅ \`fs/Kconfig\` - Added KSU_SUSFS config" >> SUSFS_PATCH_REPORT.md
-          fi
-          
-          cat >> SUSFS_PATCH_REPORT.md << 'EOF'
-          
-          ## How to Enable
-          
-          Add to your defconfig:
-          ```
-          CONFIG_KSU_SUSFS=y
-          ```
-          
-          ## Source
-          - Original commit: https://github.com/rsuplaygrnd/android_kernel_asus_sdm660/commit/fbd1ce64e7375a70c06f41584f9e783af763ea0e
-          EOF
-          
-          cat SUSFS_PATCH_REPORT.md
-
-      - name: Show git changes
-        run: |
-          echo "📋 Git status:"
-          git status
-          
-          echo ""
-          echo "📊 Changed files:"
-          git diff --stat
-          
-          echo ""
-          echo "📝 Detailed changes:"
-          git diff --name-only
-
-      - name: Commit changes
+      
+      - name: Test Compile SUSFS Module
         if: steps.verify.outputs.status == 'success'
+        continue-on-error: true
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          git checkout -b susfs-integrated
-          git add fs/susfs.c include/linux/susfs.h fs/Makefile fs/Kconfig SUSFS_PATCH_REPORT.md 2>/dev/null || true
+          echo "CONFIG_KSU_SUSFS=y" >> .config || echo "CONFIG_KSU_SUSFS=y" > .config
           
-          git commit -m "kernel: Add SUSFS (KernelSU File System) support
-
-
-      - name: Push changes
-        if: steps.verify.outputs.status == 'success'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "Testing SUSFS module compilation..."
+          make fs/susfs/ -j$(nproc) 2>&1 | tee compile.log
+          
+          if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            echo "✓ SUSFS module compiled successfully!"
+          else
+            echo "⚠️ SUSFS module compilation failed"
+            tail -n 50 compile.log
+          fi
+      
+      - name: Create Patched Branch
+        if: steps.apply_patch.outputs.result != 'failure'
         run: |
-          echo "🚀 Pushing to remote..."
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" susfs-integrated --force
+          BRANCH_NAME="susfs-patched-$(date +%Y%m%d-%H%M%S)"
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
           
-          echo "✅ Successfully pushed to branch 'susfs-integrated'"
-          echo "🔗 View changes: https://github.com/${{ github.repository }}/tree/susfs-integrated"
-
-      - name: Create Pull Request
-        if: steps.verify.outputs.status == 'success'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh pr create \
-            --title "kernel: Add SUSFS support" \
-            --body "$(cat SUSFS_PATCH_REPORT.md)
+          git checkout -b "$BRANCH_NAME"
+          git add .
           
-          ---
+          if [ "${{ steps.apply_patch.outputs.result }}" == "success" ]; then
+            git commit -m "Apply SUSFS patch for kernel ${{ steps.kernel_version.outputs.version }}
+            
+            - SUSFS branch: ${{ inputs.susfs_branch }}
+            - Patch applied cleanly
+            - All integration checks passed"
+          else
+            git commit -m "Partial SUSFS patch for kernel ${{ steps.kernel_version.outputs.version }}
+            
+            - SUSFS branch: ${{ inputs.susfs_branch }}
+            - Patch applied with conflicts
+            - Manual resolution required
+            - See MANUAL_MERGE_GUIDE.md for details" || true
+          fi
           
-          ## Testing
-          
-          To test this change:
-          1. Merge this PR
-          2. Add \`CONFIG_KSU_SUSFS=y\` to your defconfig
-          3. Build the kernel
-          4. Test with KernelSU
-          
-          ## References
-          - Source: https://github.com/rsuplaygrnd/android_kernel_asus_sdm660/commit/fbd1ce64e7375a70c06f41584f9e783af763ea0e
-          - Target kernel: https://github.com/${{ github.repository }}" \
-            --base main \
-            --head susfs-integrated 2>&1 || echo "ℹ️ PR may already exist or base branch different"
-
-      - name: Upload patch artifacts
-        if: always()
+          echo "branch=${BRANCH_NAME}" >> $GITHUB_ENV
+      
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: susfs-patch-files
+          name: susfs-patch-results
           path: |
             susfs.patch
-            SUSFS_PATCH_REPORT.md
-            fs/susfs.c
-            include/linux/susfs.h
+            patch_dryrun.log
+            conflict_report.md
+            MANUAL_MERGE_GUIDE.md
+            verification_report.md
+            compile.log
+            .backup/
+            **/*.rej
+            **/*.orig
           retention-days: 30
-
-      - name: Summary
+      
+      - name: Create Summary
         if: always()
         run: |
-          echo "## 📊 SUSFS Integration Summary" >> $GITHUB_STEP_SUMMARY
+          echo "# SUSFS Patching Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Kernel Version:** ${{ steps.kernel_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **SUSFS Branch:** ${{ inputs.susfs_branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Kernel Branch:** ${{ inputs.kernel_branch }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ "${{ steps.verify.outputs.status }}" = "success" ]; then
-            echo "✅ **Status:** Successfully integrated SUSFS" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Files Added" >> $GITHUB_STEP_SUMMARY
-            echo "- \`fs/susfs.c\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`include/linux/susfs.h\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Files Modified" >> $GITHUB_STEP_SUMMARY
-            echo "- \`fs/Makefile\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`fs/Kconfig\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
-            echo "1. Review and merge the PR" >> $GITHUB_STEP_SUMMARY
-            echo "2. Add \`CONFIG_KSU_SUSFS=y\` to your defconfig" >> $GITHUB_STEP_SUMMARY
-            echo "3. Build and test the kernel" >> $GITHUB_STEP_SUMMARY
+          echo "## Results" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.apply_patch.outputs.result }}" == "success" ]; then
+            echo "✅ **Patch Status:** Applied successfully" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.apply_patch.outputs.result }}" == "partial" ]; then
+            echo "⚠️ **Patch Status:** Applied with conflicts" >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ **Status:** SUSFS integration failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Please check the logs above for details." >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Patch Status:** Failed" >> $GITHUB_STEP_SUMMARY
           fi
+          
+          echo "- **Verification:** ${{ steps.verify.outputs.passed }}/${{ steps.verify.outputs.total }} checks passed" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f "verification_report.md" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            cat verification_report.md >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ -f "conflict_report.md" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## Conflicts" >> $GITHUB_STEP_SUMMARY
+            cat conflict_report.md >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ -n "${{ env.branch }}" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## Next Steps" >> $GITHUB_STEP_SUMMARY
+            echo "Branch created: \`${{ env.branch }}\`" >> $GITHUB_STEP_SUMMARY
+            
+            if [ "${{ steps.apply_patch.outputs.result }}" == "partial" ]; then
+              echo "- Review and resolve conflicts in \`.rej\` files" >> $GITHUB_STEP_SUMMARY
+              echo "- See MANUAL_MERGE_GUIDE.md for detailed instructions" >> $GITHUB_STEP_SUMMARY
+              echo "- Delete \`.rej\` files after resolution" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            echo "- Enable CONFIG_KSU_SUSFS in kernel config" >> $GITHUB_STEP_SUMMARY
+            echo "- Build kernel: \`make -j\$(nproc)\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Flash and test" >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: Comment on Commit (if conflicts)
+        if: steps.apply_patch.outputs.result == 'partial'
+        run: |
+          echo "⚠️ SUSFS patch applied with conflicts. Manual resolution required."
+          echo "Download artifacts to review conflict details and merge guide."
