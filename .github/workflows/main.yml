@@ -233,20 +233,6 @@ jobs:
           
           git commit -m "kernel: Add SUSFS (KernelSU File System) support
 
-This commit integrates SUSFS from the ASUS SDM660 kernel.
-
-Changes:
-- Add fs/susfs.c: Core SUSFS implementation
-- Add include/linux/susfs.h: SUSFS header definitions
-- Update fs/Makefile: Add SUSFS object compilation
-- Update fs/Kconfig: Add KSU_SUSFS configuration option
-
-To enable SUSFS, add to your defconfig:
-CONFIG_KSU_SUSFS=y
-
-Source: https://github.com/rsuplaygrnd/android_kernel_asus_sdm660/commit/fbd1ce64e7375a70c06f41584f9e783af763ea0e
-
-Signed-off-by: github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
 
       - name: Push changes
         if: steps.verify.outputs.status == 'success'
