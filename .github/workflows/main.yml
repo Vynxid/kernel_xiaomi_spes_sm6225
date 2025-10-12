@@ -24,7 +24,7 @@ jobs:
         echo "🧩 Applying SUSFS v1.5.8 (KernelSU Next v1.0.8)..."
 
         # Nama patch file
-        PATCH_FILE="ksu_hooks_sukisu_4.19.patch"
+        PATCH_FILE="50_add_susfs_in_kernel-4.19.patch"
 
         # Jika patch sudah ada di repo (misalnya kamu upload ke root repo)
         if [ -f "$PATCH_FILE" ]; then
