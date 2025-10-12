@@ -1,392 +1,261 @@
-name: Apply SUSFS Patch to Kernel
+name: Build Kernel (4.9 - crDroid)
 
 on:
   workflow_dispatch:
-    inputs:
-      kernel_branch:
-        description: 'Kernel branch to patch'
-        required: true
-        default: 'main'
-      susfs_branch:
-        description: 'SUSFS branch to use'
-        required: true
-        default: 'kernel-4.19'
-        type: choice
-        options:
-          - kernel-4.19
-          - kernel-5.4
-          - kernel-5.10
-      force_patch:
-        description: 'Force apply patch even with conflicts'
-        required: false
-        type: boolean
-        default: false
+  schedule:
+    - cron: "0 0 * * 6"
+  push:
+    branches:
+      - HEAD
+  pull_request:
+    branches:
+      - HEAD
 
 jobs:
-  patch-susfs:
+  build:
     runs-on: ubuntu-latest
-    
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_HARDLINK: "true"
+      KERNEL_DEFCONFIG: "vendor/bengal-perf_defconfig"
+      KERNEL_CMDLINE: "ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- O=out"
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
     steps:
-      - name: Checkout Kernel Source
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.kernel_branch }}
-          fetch-depth: 0
-      
-      - name: Setup Build Environment
+          submodules: "true"
+          fetch-depth: 100
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+
+      - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            bc \
-            bison \
-            flex \
-            libssl-dev \
-            libelf-dev \
-            git \
-            wget \
-            curl
-      
-      - name: Get Kernel Version
-        id: kernel_version
+          sudo apt-get update -y
+          sudo apt install gcc-aarch64-linux-gnu -y
+          sudo apt install gcc-arm-linux-gnueabi -y
+          sudo apt install aria2 binutils make python3 libssl-dev build-essential bc bison flex unzip libssl-dev ca-certificates xz-utils mkbootimg cpio device-tree-compiler git git-lfs curl wget jq -y
+
+      - name: Download GreenForce Clang
         run: |
-          VERSION=$(grep "^VERSION = " Makefile | awk '{print $3}')
-          PATCHLEVEL=$(grep "^PATCHLEVEL = " Makefile | awk '{print $3}')
-          SUBLEVEL=$(grep "^SUBLEVEL = " Makefile | awk '{print $3}')
-          KERNEL_VERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
-          echo "version=${KERNEL_VERSION}" >> $GITHUB_OUTPUT
-          echo "Kernel Version: ${KERNEL_VERSION}"
-      
-      - name: Clone SUSFS Repository
+          echo "Downloading GreenForce Clang 22.0.0..."
+          wget -q https://github.com/greenforce-project/greenforce_clang/releases/download/20251012/gf-clang-22.0.0git-20251012.tar.gz
+          mkdir -p greenforce-clang
+          tar -xzf gf-clang-22.0.0git-20251012.tar.gz -C greenforce-clang
+          rm gf-clang-22.0.0git-20251012.tar.gz
+          echo "GreenForce Clang extracted successfully"
+
+      - name: Setup SUSFS
         run: |
-          git clone -b ${{ inputs.susfs_branch }} https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
-          echo "SUSFS cloned successfully"
-      
-      - name: Copy SUSFS Source Files
+          echo "Setting up SUSFS..."
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
+
+      - name: Get Build Information
+        id: build_info
         run: |
-          if [ -d "fs/susfs" ]; then
-            echo "⚠️ fs/susfs already exists, backing up..."
-            mv fs/susfs fs/susfs.backup
-          fi
-          cp -r /tmp/susfs4ksu/fs/susfs fs/
-          echo "✓ SUSFS source copied to fs/susfs/"
-          ls -la fs/susfs/
-      
-      - name: Backup Original Files
-        run: |
-          mkdir -p .backup
-          FILES=(
-            "fs/Kconfig"
-            "fs/Makefile"
-            "fs/open.c"
-            "fs/readdir.c"
-            "fs/stat.c"
-            "fs/exec.c"
-          )
-          for file in "${FILES[@]}"; do
-            if [ -f "$file" ]; then
-              cp "$file" ".backup/$(basename $file)"
-              echo "✓ Backed up: $file"
-            fi
-          done
-      
-      - name: Download Patch File
-        run: |
-          PATCH_FILE="50_add_susfs_in_kernel-${{ inputs.susfs_branch }}.patch"
-          PATCH_URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/${{ inputs.susfs_branch }}/kernel_patches/${PATCH_FILE}"
+          # Get kernel version
+          KERNEL_VERSION=$(make kernelversion 2>/dev/null || echo "Unknown")
+          echo "kernel_version=${KERNEL_VERSION}" >> $GITHUB_OUTPUT
           
-          wget "$PATCH_URL" -O susfs.patch
-          echo "✓ Patch downloaded: susfs.patch"
+          # Get clang version
+          export PATH=$(pwd)/greenforce-clang/bin/:$PATH
+          CLANG_VERSION=$(clang --version | head -n1)
+          echo "clang_version=${CLANG_VERSION}" >> $GITHUB_OUTPUT
           
-          echo "Patch contents preview:"
-          head -n 50 susfs.patch
-      
-      - name: Test Patch (Dry Run)
-        id: test_patch
-        continue-on-error: true
+          # Get branch info
+          BRANCH_NAME=${GITHUB_REF##*/}
+          echo "branch=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+          
+          # Get commit info
+          COMMIT_MSG=$(git log -1 --pretty=%B | head -n1)
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          echo "commit_msg=${COMMIT_MSG}" >> $GITHUB_OUTPUT
+          echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
+          
+          # Build start time
+          BUILD_START=$(date '+%Y-%m-%d %H:%M:%S UTC')
+          echo "build_start=${BUILD_START}" >> $GITHUB_OUTPUT
+          echo "build_start_ts=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Send Build Start Notification
         run: |
-          if patch -p1 --dry-run < susfs.patch > patch_dryrun.log 2>&1; then
-            echo "status=success" >> $GITHUB_OUTPUT
-            echo "✓ Patch can be applied cleanly!"
-            cat patch_dryrun.log
-          else
-            echo "status=conflict" >> $GITHUB_OUTPUT
-            echo "⚠️ Patch has conflicts!"
-            cat patch_dryrun.log
-          fi
-      
-      - name: Apply Patch
-        id: apply_patch
-        continue-on-error: true
-        run: |
-          if [ "${{ steps.test_patch.outputs.status }}" == "success" ]; then
-            echo "Applying patch cleanly..."
-            patch -p1 < susfs.patch
-            echo "result=success" >> $GITHUB_OUTPUT
-            echo "✓ Patch applied successfully!"
-          else
-            echo "Attempting to apply with reject files..."
-            patch -p1 --reject < susfs.patch || true
+          curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="HTML" \
+            -d text="🔨 <b>Kernel Build Started</b>
+            📱 <b>Device:</b> Bengal (4.9)
+            🌿 <b>Branch:</b> <code>${{ steps.build_info.outputs.branch }}</code>
+            📝 <b>Commit:</b> <code>${{ steps.build_info.outputs.commit_sha }}</code>
+            💬 <b>Message:</b> ${{ steps.build_info.outputs.commit_msg }}
             
-            REJECT_FILES=$(find . -name "*.rej" 2>/dev/null || true)
-            if [ -n "$REJECT_FILES" ]; then
-              echo "result=partial" >> $GITHUB_OUTPUT
-              echo "⚠️ Patch applied with conflicts"
-              echo "Reject files:"
-              echo "$REJECT_FILES"
-            else
-              echo "result=success" >> $GITHUB_OUTPUT
-              echo "✓ Patch applied successfully with fuzzy matching"
-            fi
-          fi
-      
-      - name: Analyze Conflicts
-        if: steps.apply_patch.outputs.result == 'partial'
+            🐧 <b>Linux:</b> ${{ steps.build_info.outputs.kernel_version }}
+            🔧 <b>Compiler:</b> GreenForce Clang 22.0.0
+            ⏰ <b>Started:</b> ${{ steps.build_info.outputs.build_start }}
+
+            ⚙️ Building kernel with Sukisu..."
+
+      - name: Build Kernel-With-KernelSU
+        id: build_kernel
         run: |
-          echo "## Conflict Analysis" > conflict_report.md
-          echo "" >> conflict_report.md
+          export PATH=$(pwd)/greenforce-clang/bin/:$PATH
           
-          find . -name "*.rej" | while read -r rej_file; do
-            echo "### ${rej_file}" >> conflict_report.md
-            echo '```diff' >> conflict_report.md
-            cat "$rej_file" >> conflict_report.md
-            echo '```' >> conflict_report.md
-            echo "" >> conflict_report.md
-          done
+          echo "Starting kernel build..."
+          BUILD_START=$(date +%s)
           
-          cat conflict_report.md
-      
-      - name: Manual Integration Guide
-        if: steps.apply_patch.outputs.result == 'partial'
+          make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang" 2>&1 | tee build_config.log
+          make $KERNEL_CMDLINE CC="ccache clang" -j$(nproc --all) 2>&1 | tee build.log
+          
+          BUILD_END=$(date +%s)
+          BUILD_TIME=$((BUILD_END - BUILD_START))
+          BUILD_TIME_MIN=$((BUILD_TIME / 60))
+          BUILD_TIME_SEC=$((BUILD_TIME % 60))
+          
+          echo "build_time=${BUILD_TIME_MIN}m ${BUILD_TIME_SEC}s" >> $GITHUB_OUTPUT
+          echo "status=success" >> $GITHUB_OUTPUT
+          
+      - name: Prepare Build Logs
+        if: always()
         run: |
-          cat > MANUAL_MERGE_GUIDE.md << 'EOF'
-          # SUSFS Manual Merge Guide
+          # Create build summary
+          cat > build_summary.txt << EOF
+          ═══════════════════════════════════════
+          KERNEL BUILD SUMMARY
+          ═══════════════════════════════════════
           
-          ## Conflicts Found
+          Build Configuration:
+          • Linux Version: ${{ steps.build_info.outputs.kernel_version }}
+          • Compiler: GreenForce Clang 22.0.0
+          • Branch: ${{ steps.build_info.outputs.branch }}
+          • Commit: ${{ steps.build_info.outputs.commit_sha }}
           
-          The patch could not be applied cleanly. Manual intervention required.
+          Build Details:
+          • Started: ${{ steps.build_info.outputs.build_start }}
+          • Duration: ${{ steps.build_kernel.outputs.build_time }}
+          • Status: ${{ steps.build_kernel.outputs.status || 'failed' }}
           
-          ## Common Fixes
+          Features:
+          • KernelSU: Enabled
+          • SUSFS: Enabled
+          • Kernel Patcher: Applied
           
-          ### fs/Kconfig
-          Add before `endmenu`:
-          ```kconfig
-          source "fs/susfs/Kconfig"
-          ```
-          
-          ### fs/Makefile
-          Add with other obj-y definitions:
-          ```makefile
-          obj-$(CONFIG_KSU_SUSFS) += susfs/
-          ```
-          
-          ### fs/open.c
-          In `do_sys_open()` or `do_filp_open()`, add before `vfs_open()`:
-          ```c
-          #ifdef CONFIG_KSU_SUSFS
-          if (susfs_sus_open(tmp)) {
-              putname(tmp);
-              return -ENOENT;
-          }
-          #endif
-          ```
-          
-          ### fs/stat.c
-          In `vfs_statx()` or `vfs_stat()`:
-          ```c
-          #ifdef CONFIG_KSU_SUSFS
-          if (susfs_sus_stat(pathname))
-              return -ENOENT;
-          #endif
-          ```
-          
-          ### fs/readdir.c
-          In `iterate_dir()`:
-          ```c
-          #ifdef CONFIG_KSU_SUSFS
-          if (susfs_sus_readdir(file))
-              return -ENOENT;
-          #endif
-          ```
-          
-          ## Resolution Steps
-          
-          1. Review `.rej` files for failed hunks
-          2. Manually apply changes to corresponding files
-          3. Delete `.rej` files after resolution
-          4. Run verification checks
-          5. Commit changes
+          ═══════════════════════════════════════
           EOF
           
-          cat MANUAL_MERGE_GUIDE.md
-      
-      - name: Verify Integration
-        id: verify
+          # Append last 50 lines of build log
+          echo "" >> build_summary.txt
+          echo "Last 50 lines of build log:" >> build_summary.txt
+          echo "-----------------------------------" >> build_summary.txt
+          tail -n 50 build.log >> build_summary.txt || echo "No build log available" >> build_summary.txt
+
+      - name: Get File Sizes
+        if: success()
+        id: file_info
         run: |
-          echo "## Verification Report" > verification_report.md
-          PASSED=0
-          TOTAL=0
-          
-          # Check 1: SUSFS directory
-          TOTAL=$((TOTAL + 1))
-          if [ -d "fs/susfs" ]; then
-            echo "✓ SUSFS source directory exists" | tee -a verification_report.md
-            PASSED=$((PASSED + 1))
-          else
-            echo "✗ SUSFS source directory missing" | tee -a verification_report.md
-          fi
-          
-          # Check 2: fs/Kconfig
-          TOTAL=$((TOTAL + 1))
-          if grep -q "susfs/Kconfig" fs/Kconfig 2>/dev/null; then
-            echo "✓ SUSFS in fs/Kconfig" | tee -a verification_report.md
-            PASSED=$((PASSED + 1))
-          else
-            echo "✗ SUSFS not in fs/Kconfig" | tee -a verification_report.md
-          fi
-          
-          # Check 3: fs/Makefile
-          TOTAL=$((TOTAL + 1))
-          if grep -q "susfs/" fs/Makefile 2>/dev/null; then
-            echo "✓ SUSFS in fs/Makefile" | tee -a verification_report.md
-            PASSED=$((PASSED + 1))
-          else
-            echo "✗ SUSFS not in fs/Makefile" | tee -a verification_report.md
-          fi
-          
-          # Check 4: fs/open.c hooks
-          TOTAL=$((TOTAL + 1))
-          if grep -q "CONFIG_KSU_SUSFS" fs/open.c 2>/dev/null; then
-            echo "✓ SUSFS hooks in fs/open.c" | tee -a verification_report.md
-            PASSED=$((PASSED + 1))
-          else
-            echo "✗ SUSFS hooks not in fs/open.c" | tee -a verification_report.md
-          fi
-          
-          echo "" | tee -a verification_report.md
-          echo "**Result: ${PASSED}/${TOTAL} checks passed**" | tee -a verification_report.md
-          
-          echo "passed=${PASSED}" >> $GITHUB_OUTPUT
-          echo "total=${TOTAL}" >> $GITHUB_OUTPUT
-          
-          if [ $PASSED -eq $TOTAL ]; then
-            echo "status=success" >> $GITHUB_OUTPUT
-          else
-            echo "status=partial" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Test Compile SUSFS Module
-        if: steps.verify.outputs.status == 'success'
-        continue-on-error: true
+          IMAGE_SIZE=$(du -h out/arch/arm64/boot/Image.gz | cut -f1)
+          DTBO_SIZE=$(du -h out/arch/arm64/boot/dtbo.img | cut -f1)
+          echo "image_size=${IMAGE_SIZE}" >> $GITHUB_OUTPUT
+          echo "dtbo_size=${DTBO_SIZE}" >> $GITHUB_OUTPUT
+
+      - name: Send Success Notification with Files
+        if: success()
         run: |
-          echo "CONFIG_KSU_SUSFS=y" >> .config || echo "CONFIG_KSU_SUSFS=y" > .config
-          
-          echo "Testing SUSFS module compilation..."
-          make fs/susfs/ -j$(nproc) 2>&1 | tee compile.log
-          
-          if [ ${PIPESTATUS[0]} -eq 0 ]; then
-            echo "✓ SUSFS module compiled successfully!"
-          else
-            echo "⚠️ SUSFS module compilation failed"
-            tail -n 50 compile.log
-          fi
-      
-      - name: Create Patched Branch
-        if: steps.apply_patch.outputs.result != 'failure'
+          # Send success message
+          curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="HTML" \
+            -d text="✅ <b>Kernel Build Successful!</b>
+
+           📱 <b>Device:</b> Spes/n (4.19)
+           🌿 <b>Branch:</b> <code>${{ steps.build_info.outputs.branch }}</code>
+           📝 <b>Commit:</b> <code>${{ steps.build_info.outputs.commit_sha }}</code>
+
+          🐧 <b>Linux:</b> ${{ steps.build_info.outputs.kernel_version }}
+          🔧 <b>Compiler:</b> GreenForce Clang 22.0.0
+          ⏱ <b>Build Time:</b> ${{ steps.build_kernel.outputs.build_time }}
+
+          📦 <b>Output Files:</b>
+          • Image.gz: ${{ steps.file_info.outputs.image_size }}
+          • dtbo.img: ${{ steps.file_info.outputs.dtbo_size }}
+
+          ✨ Features: SukiSu
+
+          📄 Build log will be sent shortly..."
+
+          # Send build summary
+          curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F document=@build_summary.txt \
+            -F caption="📝 Build Summary & Log"
+
+          # Send Image.gz
+          curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F document=@out/arch/arm64/boot/Image.gz \
+            -F caption="📦 Kernel Image (Image.gz)"
+
+          # Send dtbo.img
+          curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F document=@out/arch/arm64/boot/dtbo.img \
+            -F caption="📦 DTBO Image (dtbo.img)"
+
+      - name: Send Failure Notification
+        if: failure()
         run: |
-          BRANCH_NAME="susfs-patched-$(date +%Y%m%d-%H%M%S)"
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+          # Get last 30 lines of error log
+          ERROR_LOG=$(tail -n 30 build.log 2>/dev/null || echo "No build log available")
           
-          git checkout -b "$BRANCH_NAME"
-          git add .
+          # Create error summary
+          cat > error_summary.txt << EOF
+          ═══════════════════════════════════════
+          KERNEL BUILD FAILED
+          ═══════════════════════════════════════
           
-          if [ "${{ steps.apply_patch.outputs.result }}" == "success" ]; then
-            git commit -m "Apply SUSFS patch for kernel ${{ steps.kernel_version.outputs.version }}
-            
-            - SUSFS branch: ${{ inputs.susfs_branch }}
-            - Patch applied cleanly
-            - All integration checks passed"
-          else
-            git commit -m "Partial SUSFS patch for kernel ${{ steps.kernel_version.outputs.version }}
-            
-            - SUSFS branch: ${{ inputs.susfs_branch }}
-            - Patch applied with conflicts
-            - Manual resolution required
-            - See MANUAL_MERGE_GUIDE.md for details" || true
-          fi
+          Build Configuration:
+          • Linux Version: ${{ steps.build_info.outputs.kernel_version }}
+          • Compiler: GreenForce Clang 22.0.0
+          • Branch: ${{ steps.build_info.outputs.branch }}
+          • Commit: ${{ steps.build_info.outputs.commit_sha }}
           
-          echo "branch=${BRANCH_NAME}" >> $GITHUB_ENV
-      
-      - name: Upload Artifacts
+          Error Log (last 30 lines):
+          -----------------------------------
+          ${ERROR_LOG}
+          ═══════════════════════════════════════
+          EOF
+          
+          # Send failure message
+          curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="HTML" \
+            -d text="❌ <b>Kernel Build Failed!</b>
+
+            📱 <b>Device:</b> Bengal (4.9)
+            🌿 <b>Branch:</b> <code>${{ steps.build_info.outputs.branch }}</code>
+            📝 <b>Commit:</b> <code>${{ steps.build_info.outputs.commit_sha }}</code>
+
+            🐧 <b>Linux:</b> ${{ steps.build_info.outputs.kernel_version }}
+            🔧 <b>Compiler:</b> GreenForce Clang 22.0.0
+
+            ⚠️ Check the error log for details."
+
+          # Send error log
+          curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F document=@error_summary.txt \
+            -F caption="📝 Error Log"
+
+      - name: Upload Artifacts (Backup)
+        if: success()
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: susfs-patch-results
+          name: Kernel-Build-${{ steps.build_info.outputs.commit_sha }}
           path: |
-            susfs.patch
-            patch_dryrun.log
-            conflict_report.md
-            MANUAL_MERGE_GUIDE.md
-            verification_report.md
-            compile.log
-            .backup/
-            **/*.rej
-            **/*.orig
-          retention-days: 30
-      
-      - name: Create Summary
-        if: always()
-        run: |
-          echo "# SUSFS Patching Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "- **Kernel Version:** ${{ steps.kernel_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **SUSFS Branch:** ${{ inputs.susfs_branch }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Kernel Branch:** ${{ inputs.kernel_branch }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## Results" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "${{ steps.apply_patch.outputs.result }}" == "success" ]; then
-            echo "✅ **Patch Status:** Applied successfully" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ steps.apply_patch.outputs.result }}" == "partial" ]; then
-            echo "⚠️ **Patch Status:** Applied with conflicts" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ **Patch Status:** Failed" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          echo "- **Verification:** ${{ steps.verify.outputs.passed }}/${{ steps.verify.outputs.total }} checks passed" >> $GITHUB_STEP_SUMMARY
-          
-          if [ -f "verification_report.md" ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            cat verification_report.md >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          if [ -f "conflict_report.md" ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "## Conflicts" >> $GITHUB_STEP_SUMMARY
-            cat conflict_report.md >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          if [ -n "${{ env.branch }}" ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "## Next Steps" >> $GITHUB_STEP_SUMMARY
-            echo "Branch created: \`${{ env.branch }}\`" >> $GITHUB_STEP_SUMMARY
-            
-            if [ "${{ steps.apply_patch.outputs.result }}" == "partial" ]; then
-              echo "- Review and resolve conflicts in \`.rej\` files" >> $GITHUB_STEP_SUMMARY
-              echo "- See MANUAL_MERGE_GUIDE.md for detailed instructions" >> $GITHUB_STEP_SUMMARY
-              echo "- Delete \`.rej\` files after resolution" >> $GITHUB_STEP_SUMMARY
-            fi
-            
-            echo "- Enable CONFIG_KSU_SUSFS in kernel config" >> $GITHUB_STEP_SUMMARY
-            echo "- Build kernel: \`make -j\$(nproc)\`" >> $GITHUB_STEP_SUMMARY
-            echo "- Flash and test" >> $GITHUB_STEP_SUMMARY
-          fi
-      
-      - name: Comment on Commit (if conflicts)
-        if: steps.apply_patch.outputs.result == 'partial'
-        run: |
-          echo "⚠️ SUSFS patch applied with conflicts. Manual resolution required."
-          echo "Download artifacts to review conflict details and merge guide."
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/dtbo.img
+            build_summary.txt
+          retention-days: 7
