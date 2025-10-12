@@ -1,0 +1,53 @@
+name: Apply SUSFS v1.5.8 (KernelSU Next v1.0.8)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  apply-patch:
+    name: Apply SUSFS Patch
+    runs-on: ubuntu-20.04
+
+    steps:
+    - name: Checkout kernel source
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git patch curl
+
+    - name: Apply SUSFS v1.5.8 Patch
+      run: |
+        echo "🧩 Applying SUSFS v1.5.8 (KernelSU Next v1.0.8)..."
+
+        # Nama patch file
+        PATCH_FILE="0001-kernel-implement-susfs-v1.5.8-KernelSU-Next-v1.0.8.patch"
+
+        # Jika patch sudah ada di repo (misalnya kamu upload ke root repo)
+        if [ -f "$PATCH_FILE" ]; then
+          echo "📦 Found patch file in repo: $PATCH_FILE"
+        else
+          # Kalau patch disimpan di repo lain, ubah URL berikut ke link raw file patch kamu
+          curl -L -o $PATCH_FILE https://raw.githubusercontent.com/<username>/<repo>/main/$PATCH_FILE
+        fi
+
+        # Terapkan patch
+        echo "⚙️ Applying..."
+        git apply --ignore-space-change --ignore-whitespace $PATCH_FILE || {
+          echo "⚠️ git apply failed, trying patch -p1"
+          patch -p1 < $PATCH_FILE
+        }
+
+        echo "✅ SUSFS patch applied successfully."
+
+    - name: Commit patched source
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+        git add .
+        git commit -m "Applied SUSFS v1.5.8 (KernelSU Next v1.0.8)" || echo "No changes to commit"
+        git push origin HEAD
