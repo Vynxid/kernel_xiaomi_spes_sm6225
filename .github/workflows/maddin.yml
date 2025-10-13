@@ -1,88 +1,54 @@
-name: Apply kernel patch (no-build)
+name: Apply SUSFS Patch (Kernel 4.19)
 
 on:
   workflow_dispatch:
-    inputs:
-      patch_path:
-        description: 'Relative path to patch file in repo (contoh: patches/4.9_syscall_hooks.patch)'
-        required: false
-        default: ''
-
-permissions:
-  contents: write  # diperlukan agar bisa push branch hasil patch
 
 jobs:
   apply-patch:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository (full history)
+      - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true
 
-      - name: Set default Git identity
+      - name: Configure git identity
         run: |
-          git config --global user.email "runner@github.local"
-          git config --global user.name "GitHub Actions"
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
 
-      - name: Find patch file
-        id: find
+      - name: Download SUSFS patch (for 4.19)
         run: |
-          set -e
-          if [ -n "${{ github.event.inputs.patch_path }}" ]; then
-            PATCH="${{ github.event.inputs.patch_path }}"
-          else
-            PATCH=$(git ls-files '*.patch' | head -n 1 || true)
-          fi
+          wget https://raw.githubusercontent.com/Frostleaft07/KernelSU-Patch/refs/heads/main/susfs-k4.19/SUSFS-v1.5.10-Kernel-v4.19.x.patch
+          ls -lh SUSFS-v1.5.10-Kernel-v4.19.x.patch
 
-          if [ -z "$PATCH" ]; then
-            echo "❌ Tidak ada file .patch ditemukan di repo."
-            exit 1
-          fi
-
-          echo "patch=$PATCH" >> $GITHUB_OUTPUT
-          echo "🧩 File patch ditemukan: $PATCH"
-
-      - name: Normalize patch (line endings & whitespace)
+      - name: Create working branch
         run: |
-          sudo apt-get update -y && sudo apt-get install -y dos2unix
-          PATCH="${{ steps.find.outputs.patch }}"
-          dos2unix "$PATCH"
-          sed -i 's/[ \t]*$//' "$PATCH"
-          echo "✅ Patch telah dinormalisasi (LF-only, tanpa trailing whitespace)."
-
-      - name: Apply patch (try git am, fallback to git apply)
-        env:
-          PATCH: ${{ steps.find.outputs.patch }}
-        run: |
-          set -euo pipefail
-          BRANCH="apply-patch-$(date +'%Y%m%d%H%M%S')"
+          BRANCH="susfs-patch-$(date +%s)"
           git checkout -b "$BRANCH"
+          echo "Using branch: $BRANCH" > branch.txt
 
-          echo "🚀 Mencoba apply patch: $PATCH"
-          if git am --3way "$PATCH"; then
-            echo "✅ Patch berhasil dengan git am"
-          else
-            echo "⚠️ git am gagal, mencoba fallback git apply..."
-            git am --abort || true
-            if git apply --index "$PATCH"; then
-              git add -A
-              git commit -m "Apply patch manually: $PATCH"
-              echo "✅ Patch berhasil diterapkan manual (git apply)"
-            else
-              echo "❌ Patch gagal diterapkan sama sekali."
-              exit 2
-            fi
-          fi
-
-          echo "📤 Push branch ke origin..."
-          git push origin HEAD:refs/heads/"$BRANCH"
-
-          echo "✅ Patch sukses! Branch baru: $BRANCH"
-          echo "🔗 Cek di: https://github.com/${{ github.repository }}/tree/$BRANCH"
-
-      - name: Verify result
+      - name: Apply patch (force fuzz)
         run: |
-          git log -1 --stat
+          echo "🩹 Applying SUSFS patch with fuzz=3 and ignore whitespace..."
+          patch -p1 --ignore-whitespace --fuzz=3 < SUSFS-v1.5.10-Kernel-v4.19.x.patch || true
+
+          echo ""
+          echo "=== PATCH SUMMARY ==="
+          echo "Files with .rej (failed hunks):"
+          find . -type f -name "*.rej" || true
+          echo ""
+          echo "=== git status after patch ==="
+          git status --short || true
+
+      - name: Commit patched files
+        run: |
+          git add -A
+          git commit -m "Apply SUSFS v1.5.10 patch (kernel 4.19) via CI" || echo "No changes to commit."
+
+      - name: Push branch
+        run: |
+          BRANCH=$(cat branch.txt)
+          git push origin "$BRANCH"
+          echo "✅ Pushed patched branch: $BRANCH"
