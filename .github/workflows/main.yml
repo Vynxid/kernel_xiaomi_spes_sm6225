@@ -147,21 +147,21 @@ jobs:
                       KERNEL BUILD SUMMARY
           ═══════════════════════════════════════
 
-        Build Configuration:
-         • Linux Version: ${{ steps.build_info.outputs.kernel_version }}
-         • Compiler: GreenForce Clang 22.0.0
-         • Branch: ${{ steps.build_info.outputs.branch }}
-         • Commit: ${{ steps.build_info.outputs.commit_sha }}
+           Build Configuration:
+           • Linux Version: ${{ steps.build_info.outputs.kernel_version }}
+           • Compiler: GreenForce Clang 22.0.0
+           • Branch: ${{ steps.build_info.outputs.branch }}
+           • Commit: ${{ steps.build_info.outputs.commit_sha }}
 
-        Build Details:
-         • Started: ${{ steps.build_info.outputs.build_start }}
-         • Duration: ${{ steps.build_kernel.outputs.build_time }}
-         • Status: ${{ steps.build_kernel.outputs.status || 'failed' }}
+           Build Details:
+           • Started: ${{ steps.build_info.outputs.build_start }}
+           • Duration: ${{ steps.build_kernel.outputs.build_time }}
+           • Status: ${{ steps.build_kernel.outputs.status || 'failed' }}
          
-        Features:
-         • KernelSU: Enabled
-         • SUSFS: Enabled
-         • Kernel Patcher: Applied
+          Features:
+           • KernelSU: Enabled
+           • SUSFS: Enabled
+           • Kernel Patcher: Applied
 
           ═══════════════════════════════════════
           EOF
