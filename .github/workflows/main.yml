@@ -1,4 +1,4 @@
-name: Build Kernel (4.9 - crDroid)
+name: Build Kernel (4.19)
 
 on:
   workflow_dispatch:
@@ -50,34 +50,56 @@ jobs:
           rm gf-clang-22.0.0git-20251012.tar.gz
           echo "GreenForce Clang extracted successfully"
 
-      - name: Setup SUSFS
+      # 🧩 Apply SUSFS Patch
+      - name: Apply SUSFS Patch
         run: |
-          echo "Setting up SUSFS..."
+          echo "Applying SUSFS patch for kernel 4.19..."
+          wget -q https://gitlab.com/simonpunk/susfs4ksu/-/raw/001e69919c6271f690fd00b17e4c721c9e599152/kernel_patches/50_add_susfs_in_kernel-4.19.patch -O susfs.patch
+          
+          if [ ! -f susfs.patch ]; then
+            echo "❌ Failed to download SUSFS patch."
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="❌ Failed to download SUSFS patch for kernel 4.19!"
+            exit 1
+          fi
+
+          if ! git apply --whitespace=fix susfs.patch; then
+            echo "⚠️ Failed to apply SUSFS patch."
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="⚠️ SUSFS patch failed to apply for kernel 4.19! Please check the source tree."
+            exit 1
+          fi
+
+          echo "✅ SUSFS patch applied successfully."
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="✅ SUSFS patch applied successfully for kernel 4.19."
+
+      - name: Setup KSUN
+        run: |
+          echo "Setting up KSUN..."
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
 
       - name: Get Build Information
         id: build_info
         run: |
-          # Get kernel version
           KERNEL_VERSION=$(make kernelversion 2>/dev/null || echo "Unknown")
           echo "kernel_version=${KERNEL_VERSION}" >> $GITHUB_OUTPUT
           
-          # Get clang version
           export PATH=$(pwd)/greenforce-clang/bin/:$PATH
           CLANG_VERSION=$(clang --version | head -n1)
           echo "clang_version=${CLANG_VERSION}" >> $GITHUB_OUTPUT
           
-          # Get branch info
           BRANCH_NAME=${GITHUB_REF##*/}
           echo "branch=${BRANCH_NAME}" >> $GITHUB_OUTPUT
           
-          # Get commit info
           COMMIT_MSG=$(git log -1 --pretty=%B | head -n1)
           COMMIT_SHA=$(git rev-parse --short HEAD)
           echo "commit_msg=${COMMIT_MSG}" >> $GITHUB_OUTPUT
           echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
           
-          # Build start time
           BUILD_START=$(date '+%Y-%m-%d %H:%M:%S UTC')
           echo "build_start=${BUILD_START}" >> $GITHUB_OUTPUT
           echo "build_start_ts=$(date +%s)" >> $GITHUB_OUTPUT
@@ -88,16 +110,15 @@ jobs:
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d parse_mode="HTML" \
             -d text="🔨 <b>Kernel Build Started</b>
-            📱 <b>Device:</b> Bengal (4.9)
+            📱 <b>Device:</b> Bengal (4.19)
             🌿 <b>Branch:</b> <code>${{ steps.build_info.outputs.branch }}</code>
             📝 <b>Commit:</b> <code>${{ steps.build_info.outputs.commit_sha }}</code>
-            💬 <b>Message:</b> ${{ steps.build_info.outputs.commit_msg }}
             
             🐧 <b>Linux:</b> ${{ steps.build_info.outputs.kernel_version }}
             🔧 <b>Compiler:</b> GreenForce Clang 22.0.0
             ⏰ <b>Started:</b> ${{ steps.build_info.outputs.build_start }}
 
-            ⚙️ Building kernel with Sukisu..."
+            ⚙️ Building kernel with SukiSU + SUSFS..."
 
       - name: Build Kernel-With-KernelSU
         id: build_kernel
@@ -117,36 +138,34 @@ jobs:
           
           echo "build_time=${BUILD_TIME_MIN}m ${BUILD_TIME_SEC}s" >> $GITHUB_OUTPUT
           echo "status=success" >> $GITHUB_OUTPUT
-          
+
       - name: Prepare Build Logs
         if: always()
         run: |
-          # Create build summary
           cat > build_summary.txt << EOF
           ═══════════════════════════════════════
-          KERNEL BUILD SUMMARY
+                      KERNEL BUILD SUMMARY
           ═══════════════════════════════════════
-          
-          Build Configuration:
-          • Linux Version: ${{ steps.build_info.outputs.kernel_version }}
-          • Compiler: GreenForce Clang 22.0.0
-          • Branch: ${{ steps.build_info.outputs.branch }}
-          • Commit: ${{ steps.build_info.outputs.commit_sha }}
-          
-          Build Details:
-          • Started: ${{ steps.build_info.outputs.build_start }}
-          • Duration: ${{ steps.build_kernel.outputs.build_time }}
-          • Status: ${{ steps.build_kernel.outputs.status || 'failed' }}
-          
-          Features:
-          • KernelSU: Enabled
-          • SUSFS: Enabled
-          • Kernel Patcher: Applied
-          
+
+        Build Configuration:
+         • Linux Version: ${{ steps.build_info.outputs.kernel_version }}
+         • Compiler: GreenForce Clang 22.0.0
+         • Branch: ${{ steps.build_info.outputs.branch }}
+         • Commit: ${{ steps.build_info.outputs.commit_sha }}
+
+        Build Details:
+         • Started: ${{ steps.build_info.outputs.build_start }}
+         • Duration: ${{ steps.build_kernel.outputs.build_time }}
+         • Status: ${{ steps.build_kernel.outputs.status || 'failed' }}
+         
+        Features:
+         • KernelSU: Enabled
+         • SUSFS: Enabled
+         • Kernel Patcher: Applied
+
           ═══════════════════════════════════════
           EOF
-          
-          # Append last 50 lines of build log
+
           echo "" >> build_summary.txt
           echo "Last 50 lines of build log:" >> build_summary.txt
           echo "-----------------------------------" >> build_summary.txt
@@ -164,41 +183,35 @@ jobs:
       - name: Send Success Notification with Files
         if: success()
         run: |
-          # Send success message
           curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d parse_mode="HTML" \
             -d text="✅ <b>Kernel Build Successful!</b>
 
-           📱 <b>Device:</b> Spes/n (4.19)
-           🌿 <b>Branch:</b> <code>${{ steps.build_info.outputs.branch }}</code>
-           📝 <b>Commit:</b> <code>${{ steps.build_info.outputs.commit_sha }}</code>
+            📱 <b>Device:</b> Bengal (4.19)
+            🌿 <b>Branch:</b> <code>${{ steps.build_info.outputs.branch }}</code>
+            📝 <b>Commit:</b> <code>${{ steps.build_info.outputs.commit_sha }}</code>
 
-          🐧 <b>Linux:</b> ${{ steps.build_info.outputs.kernel_version }}
-          🔧 <b>Compiler:</b> GreenForce Clang 22.0.0
-          ⏱ <b>Build Time:</b> ${{ steps.build_kernel.outputs.build_time }}
+            🐧 <b>Linux:</b> ${{ steps.build_info.outputs.kernel_version }}
+            🔧 <b>Compiler:</b> GreenForce Clang 22.0.0
+            ⏱ <b>Build Time:</b> ${{ steps.build_kernel.outputs.build_time }}
 
-          📦 <b>Output Files:</b>
-          • Image.gz: ${{ steps.file_info.outputs.image_size }}
-          • dtbo.img: ${{ steps.file_info.outputs.dtbo_size }}
+            📦 <b>Output Files:</b>
+             • Image.gz: ${{ steps.file_info.outputs.image_size }}
+             • dtbo.img: ${{ steps.file_info.outputs.dtbo_size }}
 
-          ✨ Features: SukiSu
+            ✨ Features: SukiSU + SUSFS"
 
-          📄 Build log will be sent shortly..."
-
-          # Send build summary
           curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
             -F chat_id="${TELEGRAM_CHAT_ID}" \
             -F document=@build_summary.txt \
             -F caption="📝 Build Summary & Log"
 
-          # Send Image.gz
           curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
             -F chat_id="${TELEGRAM_CHAT_ID}" \
             -F document=@out/arch/arm64/boot/Image.gz \
             -F caption="📦 Kernel Image (Image.gz)"
 
-          # Send dtbo.img
           curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
             -F chat_id="${TELEGRAM_CHAT_ID}" \
             -F document=@out/arch/arm64/boot/dtbo.img \
@@ -207,34 +220,31 @@ jobs:
       - name: Send Failure Notification
         if: failure()
         run: |
-          # Get last 30 lines of error log
           ERROR_LOG=$(tail -n 30 build.log 2>/dev/null || echo "No build log available")
           
-          # Create error summary
           cat > error_summary.txt << EOF
-          ═══════════════════════════════════════
-          KERNEL BUILD FAILED
-          ═══════════════════════════════════════
-          
+             ═══════════════════════════════════════
+                     KERNEL BUILD FAILED
+             ═══════════════════════════════════════
+
           Build Configuration:
-          • Linux Version: ${{ steps.build_info.outputs.kernel_version }}
-          • Compiler: GreenForce Clang 22.0.0
-          • Branch: ${{ steps.build_info.outputs.branch }}
-          • Commit: ${{ steps.build_info.outputs.commit_sha }}
+             • Linux Version: ${{ steps.build_info.outputs.kernel_version }}
+             • Compiler: GreenForce Clang 22.0.0
+             • Branch: ${{ steps.build_info.outputs.branch }}
+             • Commit: ${{ steps.build_info.outputs.commit_sha }}
+
+              Error Log (last 30 lines):
+              -----------------------------------
+                  ${ERROR_LOG}
+               ═══════════════════════════════════════
+               EOF
           
-          Error Log (last 30 lines):
-          -----------------------------------
-          ${ERROR_LOG}
-          ═══════════════════════════════════════
-          EOF
-          
-          # Send failure message
           curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d parse_mode="HTML" \
             -d text="❌ <b>Kernel Build Failed!</b>
 
-            📱 <b>Device:</b> Bengal (4.9)
+            📱 <b>Device:</b> Bengal (4.19)
             🌿 <b>Branch:</b> <code>${{ steps.build_info.outputs.branch }}</code>
             📝 <b>Commit:</b> <code>${{ steps.build_info.outputs.commit_sha }}</code>
 
@@ -243,16 +253,15 @@ jobs:
 
             ⚠️ Check the error log for details."
 
-          # Send error log
           curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
             -F chat_id="${TELEGRAM_CHAT_ID}" \
             -F document=@error_summary.txt \
             -F caption="📝 Error Log"
 
-      - name: Upload Artifacts (Backup)
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
+           - name: Upload Artifacts (Backup)
+             if: success()
+             uses: actions/upload-artifact@v4
+             with:
           name: Kernel-Build-${{ steps.build_info.outputs.commit_sha }}
           path: |
             out/arch/arm64/boot/Image.gz
